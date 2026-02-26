@@ -7,7 +7,10 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from langchain_aws import ChatBedrock
+try:
+    from langchain_aws import ChatBedrock
+except ImportError:
+    ChatBedrock = object
 from langchain_core.prompts import ChatPromptTemplate
 from langsmith import traceable
 

@@ -10,15 +10,26 @@ import uuid
 from datetime import datetime
 from typing import Dict
 
-import boto3
-from langchain.tools import tool
-from langsmith import traceable
+try:
+    import boto3
+    sm_client = boto3.client("sagemaker")
+except Exception:
+    boto3 = None
+    sm_client = None
+
+try:
+    from langchain.tools import tool
+except ImportError:
+    def tool(f): return f
+
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(**kw): return lambda f: f
 
 from src.agents.state import MLPipelineState, PipelineStatus
 
 logger = logging.getLogger(__name__)
-
-sm_client = boto3.client("sagemaker")
 
 
 @tool
@@ -29,9 +40,10 @@ def submit_training_job(
     hyperparameters: Dict[str, str] | None = None,
 ) -> Dict:
     """Submit a SageMaker training job and return the job name."""
+    if sm_client is None:
+        raise RuntimeError("boto3/SageMaker not available — use mock in local mode")
     job_name = f"{model_name}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
     hp = hyperparameters or {"epochs": "10", "learning_rate": "2e-5", "batch_size": "32"}
-
     sm_client.create_training_job(
         TrainingJobName=job_name,
         HyperParameters=hp,
@@ -55,17 +67,14 @@ def submit_training_job(
 @tool
 def poll_training_job(job_name: str, poll_interval_seconds: int = 60) -> Dict:
     """Poll a SageMaker training job until it completes or fails."""
+    if sm_client is None:
+        raise RuntimeError("boto3/SageMaker not available — use mock in local mode")
     terminal = {"Completed", "Failed", "Stopped"}
     while True:
         resp = sm_client.describe_training_job(TrainingJobName=job_name)
         status = resp["TrainingJobStatus"]
-        logger.info("Job %s: %s", job_name, status)
-
         if status in terminal:
-            metrics = {
-                m["MetricName"]: m["Value"]
-                for m in resp.get("FinalMetricDataList", [])
-            }
+            metrics = {m["MetricName"]: m["Value"] for m in resp.get("FinalMetricDataList", [])}
             return {
                 "status": status,
                 "metrics": metrics,
@@ -78,7 +87,6 @@ class TrainingAgent:
     def __init__(self):
         self.tools = [submit_training_job, poll_training_job]
 
-    @traceable(name="training-agent-run")
     def run(self, state: MLPipelineState) -> MLPipelineState:
         try:
             submit_result = submit_training_job.invoke({
@@ -86,7 +94,6 @@ class TrainingAgent:
                 "data_uri": state["data_uri"],
             })
             job_name = submit_result["job_name"]
-
             poll_result = poll_training_job.invoke({"job_name": job_name})
 
             if poll_result["status"] != "Completed":
@@ -105,7 +112,6 @@ class TrainingAgent:
                 "model_artifact_uri": poll_result["artifact_uri"],
                 "current_agent": "evaluation_agent",
             }
-
         except Exception as e:
             logger.exception("Training agent error")
             return {
